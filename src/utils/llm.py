@@ -1,10 +1,15 @@
 """Helper functions for LLM"""
 
 import json
-from typing import TypeVar, Type, Optional, Any
+import logging
+from typing import Any, Optional, Type, TypeVar
+
 from pydantic import BaseModel
+
 from src.llm.models import get_model, get_model_info
 from src.utils.progress import progress
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -49,6 +54,7 @@ def call_llm(
         try:
             # Call the LLM
             result = llm.invoke(prompt)
+            logger.debug("LLM response from %s: %s", agent_name or "unknown", getattr(result, "content", result))
 
             # For non-JSON support models, we need to extract and parse the JSON manually
             if model_info and not model_info.has_json_mode():
@@ -106,6 +112,8 @@ def extract_json_from_response(content: str) -> Optional[dict]:
             if json_end != -1:
                 json_text = json_text[:json_end].strip()
                 return json.loads(json_text)
+        # Fallback: attempt to parse the whole string
+        return json.loads(content.strip())
     except Exception as e:
-        print(f"Error extracting JSON from response: {e}")
+        logger.debug("Error extracting JSON from response: %s", e)
     return None
