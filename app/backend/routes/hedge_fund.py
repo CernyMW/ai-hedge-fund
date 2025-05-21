@@ -4,8 +4,9 @@ import asyncio
 
 from app.backend.models.schemas import ErrorResponse, HedgeFundRequest
 from app.backend.models.events import StartEvent, ProgressUpdateEvent, ErrorEvent, CompleteEvent
-from app.backend.services.graph import create_graph, run_graph_async # Removed parse_hedge_fund_response
-from src.utils.parsing import parse_json_response # Added import
+from app.backend.services.graph import run_graph_async # Removed create_graph
+from src.graph.builder import build_agent_workflow # Added import
+from src.utils.parsing import parse_json_response
 from app.backend.services.portfolio import create_portfolio
 from src.utils.progress import progress
 
@@ -29,7 +30,7 @@ async def run_hedge_fund(request: HedgeFundRequest):
         portfolio = create_portfolio(request.initial_cash, request.margin_requirement, request.tickers)
 
         # Construct agent graph
-        graph = create_graph(request.selected_agents)
+        graph = build_agent_workflow(request.selected_agents) # Replaced function call
         graph = graph.compile()
 
         # Log a test progress update for debugging

@@ -1,52 +1,15 @@
 import asyncio
 import json
 from langchain_core.messages import HumanMessage
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, StateGraph # StateGraph used in run_graph type hint
 
-from src.agents.portfolio_manager import portfolio_management_agent
-from src.agents.risk_manager import risk_management_agent
-from src.main import start
-from src.utils.analysts import ANALYST_CONFIG
-from src.graph.state import AgentState
-from src.utils.parsing import parse_json_response # Added import
-
-
-# Helper function to create the agent graph
-def create_graph(selected_agents: list[str]) -> StateGraph:
-    """Create the workflow with selected agents."""
-    graph = StateGraph(AgentState)
-    graph.add_node("start_node", start)
-
-    # Filter out any agents that are not in analyst.py
-    selected_agents = [agent for agent in selected_agents if agent in ANALYST_CONFIG]
-
-    # Get analyst nodes from the configuration
-    analyst_nodes = {key: (f"{key}_agent", config["agent_func"]) for key, config in ANALYST_CONFIG.items()}
-
-    # Add selected analyst nodes
-    for agent_name in selected_agents:
-        node_name, node_func = analyst_nodes[agent_name]
-        graph.add_node(node_name, node_func)
-        graph.add_edge("start_node", node_name)
-
-    # Always add risk and portfolio management (for now)
-    graph.add_node("risk_management_agent", risk_management_agent)
-    graph.add_node("portfolio_manager", portfolio_management_agent)
-
-    # Connect selected agents to risk management
-    for agent_name in selected_agents:
-        node_name = analyst_nodes[agent_name][0]
-        graph.add_edge(node_name, "risk_management_agent")
-
-    # Connect the risk management agent to the portfolio management agent
-    graph.add_edge("risk_management_agent", "portfolio_manager")
-
-    # Connect the portfolio management agent to the end node
-    graph.add_edge("portfolio_manager", END)
-
-    # Set the entry point to the start node
-    graph.set_entry_point("start_node")
-    return graph
+from src.agents.portfolio_manager import portfolio_management_agent # Used in build_agent_workflow, but that's now in builder.py
+from src.agents.risk_manager import risk_management_agent # Used in build_agent_workflow, but that's now in builder.py
+# from src.main import start # Removed import
+from src.utils.analysts import ANALYST_CONFIG # Used in build_agent_workflow, but that's now in builder.py
+from src.graph.state import AgentState # Used in StateGraph type hint
+from src.utils.parsing import parse_json_response
+from src.graph.runner import execute_graph_invocation # Added import
 
 
 async def run_graph_async(graph, portfolio, tickers, start_date, end_date, model_name, model_provider):
@@ -69,27 +32,16 @@ def run_graph(
 ) -> dict:
     """
     Run the graph with the given portfolio, tickers,
-    start date, end date, show reasoning, model name,
-    and model provider.
+    start date, end date, model name, and model provider.
+    Metadata 'show_reasoning' defaults to False for backend use.
     """
-    return graph.invoke(
-        {
-            "messages": [
-                HumanMessage(
-                    content="Make trading decisions based on the provided data.",
-                )
-            ],
-            "data": {
-                "tickers": tickers,
-                "portfolio": portfolio,
-                "start_date": start_date,
-                "end_date": end_date,
-                "analyst_signals": {},
-            },
-            "metadata": {
-                "show_reasoning": False,
-                "model_name": model_name,
-                "model_provider": model_provider,
-            },
-        },
+    return execute_graph_invocation(
+        compiled_graph=graph,
+        tickers=tickers,
+        portfolio=portfolio,
+        start_date=start_date,
+        end_date=end_date,
+        model_name=model_name,
+        model_provider=model_provider,
+        show_reasoning=False # Explicitly False for backend
     )

@@ -14,7 +14,10 @@ from src.utils.analysts import ANALYST_ORDER, get_analyst_nodes
 from src.utils.progress import progress
 from src.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelProvider
 from src.utils.ollama import ensure_ollama_and_model
-from src.utils.parsing import parse_json_response # Added import
+from src.utils.parsing import parse_json_response
+from app.backend.services.portfolio import create_portfolio # Added import
+from src.graph.builder import build_agent_workflow # Added import
+from src.graph.runner import execute_graph_invocation # Added import
 
 import argparse
 from datetime import datetime
@@ -26,6 +29,14 @@ import json
 load_dotenv()
 
 init(autoreset=True)
+
+# Configure logging
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
 ##### Run the Hedge Fund #####
@@ -44,35 +55,28 @@ def run_hedge_fund(
 
     try:
         # Create a new workflow if analysts are customized
-        if selected_analysts:
-            workflow = create_workflow(selected_analysts)
-            agent = workflow.compile()
-        else:
-            agent = app
+        # The 'app' variable might be globally defined or passed differently if this is part of a larger app.
+        # Assuming 'app' is a pre-compiled default workflow if selected_analysts is empty.
+        # For now, we build the workflow regardless.
+        workflow = build_agent_workflow(selected_analysts) # Replaced function call
+        agent = workflow.compile()
+        # else:
+            # agent = app # This line suggests 'app' should be a default compiled graph.
+                         # If 'app' is not defined elsewhere, this path will cause an error.
+                         # For this refactoring, we'll assume building the workflow is always intended.
 
-        final_state = agent.invoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content="Make trading decisions based on the provided data.",
-                    )
-                ],
-                "data": {
-                    "tickers": tickers,
-                    "portfolio": portfolio,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "analyst_signals": {},
-                },
-                "metadata": {
-                    "show_reasoning": show_reasoning,
-                    "model_name": model_name,
-                    "model_provider": model_provider,
-                },
-            },
+        final_state = execute_graph_invocation( # Replaced agent.invoke call
+            compiled_graph=agent,
+            tickers=tickers,
+            portfolio=portfolio,
+            start_date=start_date,
+            end_date=end_date,
+            model_name=model_name,
+            model_provider=model_provider,
+            show_reasoning=show_reasoning
         )
 
-        parsed_response = parse_json_response(final_state["messages"][-1].content) # Replaced function call
+        parsed_response = parse_json_response(final_state["messages"][-1].content)
         decisions = parsed_response.get("decisions") if isinstance(parsed_response, dict) else None
         return {
             "decisions": decisions,
@@ -81,44 +85,6 @@ def run_hedge_fund(
     finally:
         # Stop progress tracking
         progress.stop()
-
-
-def start(state: AgentState):
-    """Initialize the workflow with the input message."""
-    return state
-
-
-def create_workflow(selected_analysts=None):
-    """Create the workflow with selected analysts."""
-    workflow = StateGraph(AgentState)
-    workflow.add_node("start_node", start)
-
-    # Get analyst nodes from the configuration
-    analyst_nodes = get_analyst_nodes()
-
-    # Default to all analysts if none selected
-    if selected_analysts is None:
-        selected_analysts = list(analyst_nodes.keys())
-    # Add selected analyst nodes
-    for analyst_key in selected_analysts:
-        node_name, node_func = analyst_nodes[analyst_key]
-        workflow.add_node(node_name, node_func)
-        workflow.add_edge("start_node", node_name)
-
-    # Always add risk and portfolio management
-    workflow.add_node("risk_management_agent", risk_management_agent)
-    workflow.add_node("portfolio_manager", portfolio_management_agent)
-
-    # Connect selected analysts to risk management
-    for analyst_key in selected_analysts:
-        node_name = analyst_nodes[analyst_key][0]
-        workflow.add_edge(node_name, "risk_management_agent")
-
-    workflow.add_edge("risk_management_agent", "portfolio_manager")
-    workflow.add_edge("portfolio_manager", END)
-
-    workflow.set_entry_point("start_node")
-    return workflow
 
 
 if __name__ == "__main__":
@@ -247,7 +213,11 @@ if __name__ == "__main__":
             print(f"\nSelected model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
 
     # Create the workflow with selected analysts
-    workflow = create_workflow(selected_analysts)
+    # Note: The global 'app' variable assignment is here.
+    # If run_hedge_fund is called with selected_analysts=None (or empty list leading to None behavior),
+    # it will now build a workflow instead of potentially using a pre-existing 'app'.
+    # This might change behavior if 'app' was intended to be a specific default graph instance.
+    workflow = build_agent_workflow(selected_analysts) # Replaced function call
     app = workflow.compile()
 
     if args.show_agent_graph:
@@ -281,28 +251,11 @@ if __name__ == "__main__":
         start_date = args.start_date
 
     # Initialize portfolio with cash amount and stock positions
-    portfolio = {
-        "cash": args.initial_cash,  # Initial cash amount
-        "margin_requirement": args.margin_requirement,  # Initial margin requirement
-        "margin_used": 0.0,  # total margin usage across all short positions
-        "positions": {
-            ticker: {
-                "long": 0,  # Number of shares held long
-                "short": 0,  # Number of shares held short
-                "long_cost_basis": 0.0,  # Average cost basis for long positions
-                "short_cost_basis": 0.0,  # Average price at which shares were sold short
-                "short_margin_used": 0.0,  # Dollars of margin used for this ticker's short
-            }
-            for ticker in tickers
-        },
-        "realized_gains": {
-            ticker: {
-                "long": 0.0,  # Realized gains from long positions
-                "short": 0.0,  # Realized gains from short positions
-            }
-            for ticker in tickers
-        },
-    }
+    portfolio = create_portfolio(
+        initial_cash=args.initial_cash,
+        margin_requirement=args.margin_requirement,
+        tickers=tickers
+    )
 
     # Run the hedge fund
     result = run_hedge_fund(
