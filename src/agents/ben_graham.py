@@ -1,5 +1,6 @@
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
+from src.tools.api import get_financial_metrics, get_market_cap, search_line_items, get_dividend_history # Updated import
+from src.data.models import Dividend # Added import
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -41,19 +42,24 @@ def ben_graham_agent(state: AgentState):
         progress.update_status("ben_graham_agent", ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date)
 
+        progress.update_status("ben_graham_agent", ticker, "Fetching dividend history")
+        # Fetch up to ~20 years of quarterly dividends.
+        # Polygon free tier might limit this, but we ask for a comprehensive history.
+        dividend_history: list[Dividend] = get_dividend_history(ticker, limit=80)
+
         # Perform sub-analyses
         progress.update_status("ben_graham_agent", ticker, "Analyzing earnings stability")
         earnings_analysis = analyze_earnings_stability(metrics, financial_line_items)
 
         progress.update_status("ben_graham_agent", ticker, "Analyzing financial strength")
-        strength_analysis = analyze_financial_strength(financial_line_items)
+        strength_analysis = analyze_financial_strength(financial_line_items, dividend_history) # Updated call
 
         progress.update_status("ben_graham_agent", ticker, "Analyzing Graham valuation")
         valuation_analysis = analyze_valuation_graham(financial_line_items, market_cap)
 
         # Aggregate scoring
         total_score = earnings_analysis["score"] + strength_analysis["score"] + valuation_analysis["score"]
-        max_possible_score = 15  # total possible from the three analysis functions
+        max_possible_score = 16  # total possible from the three analysis functions
 
         # Map total_score to signal
         if total_score >= 0.7 * max_possible_score:
@@ -136,7 +142,7 @@ def analyze_earnings_stability(metrics: list, financial_line_items: list) -> dic
     return {"score": score, "details": "; ".join(details)}
 
 
-def analyze_financial_strength(financial_line_items: list) -> dict:
+def analyze_financial_strength(financial_line_items: list, dividend_history: list[Dividend]) -> dict: # Signature updated
     """
     Graham checks liquidity (current ratio >= 2), manageable debt,
     and dividend record (preferably some history of dividends).
@@ -144,60 +150,78 @@ def analyze_financial_strength(financial_line_items: list) -> dict:
     score = 0
     details = []
 
-    if not financial_line_items:
-        return {"score": score, "details": "No data for financial strength analysis"}
+    if not financial_line_items: # This check remains for other parts of the analysis
+        # If dividend_history is the only thing used and it's empty, specific checks below will handle it.
+        # However, if financial_line_items is crucial for other parts, this early exit is fine.
+        # For now, assuming financial_line_items are needed for current ratio and debt ratio.
+        return {"score": score, "details": "No financial line item data for financial strength analysis"}
 
-    latest_item = financial_line_items[0]
-    total_assets = latest_item.total_assets or 0
-    total_liabilities = latest_item.total_liabilities or 0
-    current_assets = latest_item.current_assets or 0
-    current_liabilities = latest_item.current_liabilities or 0
+    # Ensure there's at least one item for current/debt ratio calculations
+    if financial_line_items:
+        latest_item = financial_line_items[0]
+        total_assets = latest_item.total_assets or 0
+        total_liabilities = latest_item.total_liabilities or 0
+        current_assets = latest_item.current_assets or 0
+        current_liabilities = latest_item.current_liabilities or 0
 
-    # 1. Current ratio
-    if current_liabilities > 0:
-        current_ratio = current_assets / current_liabilities
-        if current_ratio >= 2.0:
-            score += 2
-            details.append(f"Current ratio = {current_ratio:.2f} (>=2.0: solid).")
-        elif current_ratio >= 1.5:
-            score += 1
-            details.append(f"Current ratio = {current_ratio:.2f} (moderately strong).")
-        else:
-            details.append(f"Current ratio = {current_ratio:.2f} (<1.5: weaker liquidity).")
-    else:
-        details.append("Cannot compute current ratio (missing or zero current_liabilities).")
-
-    # 2. Debt vs. Assets
-    if total_assets > 0:
-        debt_ratio = total_liabilities / total_assets
-        if debt_ratio < 0.5:
-            score += 2
-            details.append(f"Debt ratio = {debt_ratio:.2f}, under 0.50 (conservative).")
-        elif debt_ratio < 0.8:
-            score += 1
-            details.append(f"Debt ratio = {debt_ratio:.2f}, somewhat high but could be acceptable.")
-        else:
-            details.append(f"Debt ratio = {debt_ratio:.2f}, quite high by Graham standards.")
-    else:
-        details.append("Cannot compute debt ratio (missing total_assets).")
-
-    # 3. Dividend track record
-    div_periods = [item.dividends_and_other_cash_distributions for item in financial_line_items if item.dividends_and_other_cash_distributions is not None]
-    if div_periods:
-        # In many data feeds, dividend outflow is shown as a negative number
-        # (money going out to shareholders). We'll consider any negative as 'paid a dividend'.
-        div_paid_years = sum(1 for d in div_periods if d < 0)
-        if div_paid_years > 0:
-            # e.g. if at least half the periods had dividends
-            if div_paid_years >= (len(div_periods) // 2 + 1):
+        # 1. Current ratio
+        if current_liabilities > 0:
+            current_ratio = current_assets / current_liabilities
+            if current_ratio >= 2.0:
+                score += 2
+                details.append(f"Current ratio = {current_ratio:.2f} (>=2.0: solid).")
+            elif current_ratio >= 1.5:
                 score += 1
-                details.append("Company paid dividends in the majority of the reported years.")
+                details.append(f"Current ratio = {current_ratio:.2f} (moderately strong).")
             else:
-                details.append("Company has some dividend payments, but not most years.")
+                details.append(f"Current ratio = {current_ratio:.2f} (<1.5: weaker liquidity).")
         else:
-            details.append("Company did not pay dividends in these periods.")
+            details.append("Cannot compute current ratio (missing or zero current_liabilities for latest period).")
+
+        # 2. Debt vs. Assets
+        if total_assets > 0:
+            debt_ratio = total_liabilities / total_assets
+            if debt_ratio < 0.5:
+                score += 2
+                details.append(f"Debt ratio = {debt_ratio:.2f}, under 0.50 (conservative).")
+            elif debt_ratio < 0.8:
+                score += 1
+                details.append(f"Debt ratio = {debt_ratio:.2f}, somewhat high but could be acceptable.")
+            else:
+                details.append(f"Debt ratio = {debt_ratio:.2f}, quite high by Graham standards.")
+        else:
+            details.append("Cannot compute debt ratio (missing total_assets for latest period).")
+    else: # financial_line_items is empty
+        details.append("No financial line items available for current ratio and debt ratio analysis.")
+
+
+    # 3. Dividend track record (using new dividend_history)
+    if dividend_history:
+        cash_dividend_years = set()
+        for div_event in dividend_history:
+            if div_event.dividend_type == 'CD' and div_event.cash_amount > 0.0 and div_event.ex_dividend_date:
+                try:
+                    year = int(div_event.ex_dividend_date[:4]) # Extract year
+                    cash_dividend_years.add(year)
+                except ValueError:
+                    # Log or skip malformed date if necessary
+                    continue 
+        
+        num_distinct_dividend_years = len(cash_dividend_years)
+
+        if num_distinct_dividend_years >= 10: # Graham might prefer 20, but 10 is a good threshold
+            score += 1 # Assign 1 point for a solid dividend history
+            details.append(f"Consistent dividend payer: Paid cash dividends in {num_distinct_dividend_years} distinct years (>=10 years is good).")
+        elif num_distinct_dividend_years >= 5:
+            details.append(f"Some dividend history: Paid cash dividends in {num_distinct_dividend_years} distinct years (5-9 years).")
+        elif num_distinct_dividend_years > 0:
+            details.append(f"Limited dividend history: Paid cash dividends in {num_distinct_dividend_years} year(s).")
+        else:
+            # This case means dividend_history was not empty, but no valid cash dividends were found (e.g., only stock splits)
+            details.append("No history of regular cash dividend payments found in the provided data.")
     else:
-        details.append("No dividend data available to assess payout consistency.")
+        # This case means dividend_history was an empty list (no dividends from API)
+        details.append("No dividend payments reported for this stock (e.g., AMZN).")
 
     return {"score": score, "details": "; ".join(details)}
 
@@ -302,7 +326,7 @@ def generate_graham_output(
             
             When providing your reasoning, be thorough and specific by:
             1. Explaining the key valuation metrics that influenced your decision the most (Graham Number, NCAV, P/E, etc.)
-            2. Highlighting the specific financial strength indicators (current ratio, debt levels, etc.)
+            2. Highlighting the specific financial strength indicators (current ratio, debt levels, dividend payment history, etc.)
             3. Referencing the stability or instability of earnings over time
             4. Providing quantitative evidence with precise numbers
             5. Comparing current metrics to Graham's specific thresholds (e.g., "Current ratio of 2.5 exceeds Graham's minimum of 2.0")
