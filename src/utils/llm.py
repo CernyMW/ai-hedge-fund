@@ -1,6 +1,7 @@
 """Helper functions for LLM"""
 
 import json
+import re # Added import for regular expressions
 from typing import TypeVar, Type, Optional, Any
 from pydantic import BaseModel
 from src.llm.models import get_model, get_model_info
@@ -103,15 +104,36 @@ def create_default_response(model_class: Type[T]) -> T:
 
 
 def extract_json_from_response(content: str) -> Optional[dict]:
-    """Extracts JSON from markdown-formatted response."""
+    """
+    Extracts JSON from markdown-formatted response.
+    Removes <think>...</think> blocks and then attempts to parse JSON.
+    """
+    # Remove <think>...</think> blocks
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
     try:
+        # Attempt to find JSON within ```json ... ``` code blocks
         json_start = content.find("```json")
         if json_start != -1:
-            json_text = content[json_start + 7 :]  # Skip past ```json
-            json_end = json_text.find("```")
+            # Adjust json_start to be after "```json"
+            json_text_start = content[json_start + 7 :] 
+            json_end = json_text_start.find("```")
             if json_end != -1:
-                json_text = json_text[:json_end].strip()
-                return json.loads(json_text)
-    except Exception as e:
-        print(f"Error extracting JSON from response: {e}")
+                json_text = json_text_start[:json_end].strip()
+                try:
+                    return json.loads(json_text)
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON from ```json ... ``` block: {e}")
+                    # Fall through to try parsing the whole content if this fails
+                    pass # Add this pass to explicitly show we are falling through
+
+        # Fallback: if no ```json ... ``` block or if parsing it failed, try to parse the entire content
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from the entire content: {e}")
+            return None
+
+    except Exception as e: # General exception catch for unexpected errors
+        print(f"Unexpected error in extract_json_from_response: {e}")
     return None
