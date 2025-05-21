@@ -4,7 +4,8 @@ import asyncio
 
 from app.backend.models.schemas import ErrorResponse, HedgeFundRequest
 from app.backend.models.events import StartEvent, ProgressUpdateEvent, ErrorEvent, CompleteEvent
-from app.backend.services.graph import create_graph, parse_hedge_fund_response, run_graph_async
+from app.backend.services.graph import create_graph, run_graph_async # Removed parse_hedge_fund_response
+from src.utils.parsing import parse_json_response # Added import
 from app.backend.services.portfolio import create_portfolio
 from src.utils.progress import progress
 
@@ -88,7 +89,7 @@ async def run_hedge_fund(request: HedgeFundRequest):
                 # Send the final result
                 final_data = CompleteEvent(
                     data={
-                        "decisions": parse_hedge_fund_response(result.get("messages", [])[-1].content),
+                        "decisions": parse_json_response(result.get("messages", [])[-1].content), # Replaced function call
                         "analyst_signals": result.get("data", {}).get("analyst_signals", {}),
                     }
                 )

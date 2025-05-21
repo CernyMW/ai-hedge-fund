@@ -406,7 +406,7 @@ def generate_damodaran_output(
         return AswathDamodaranSignal(
             signal="neutral",
             confidence=0.0,
-            reasoning="Parsing error; defaulting to neutral",
+            reasoning="Error processing LLM response for Aswath Damodaran agent; defaulting to neutral signal.",
         )
 
     return call_llm(
