@@ -11,6 +11,7 @@ from src.data.models import (
     LineItem,
     Price,
     InsiderTrade,
+    Dividend, # Added Dividend
 )
 
 # Global cache instance
@@ -338,3 +339,52 @@ def prices_to_df(prices: list[Price]) -> pd.DataFrame:
 def get_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     prices = get_prices(ticker, start_date, end_date)
     return prices_to_df(prices)
+
+
+def get_dividend_history(
+    ticker: str,
+    ex_dividend_date_gte: str | None = None, # Format: YYYY-MM-DD
+    ex_dividend_date_lte: str | None = None, # Format: YYYY-MM-DD
+    limit: int = 50  # Number of dividends to return
+) -> list[Dividend]:
+    """Fetch dividend history from cache or Polygon API."""
+    # Try cache first - simple cache by ticker for all its dividends
+    # More sophisticated date-range caching could be added if needed
+    if not ex_dividend_date_gte and not ex_dividend_date_lte: # Only use full cache if no date filters
+        if cached_data := _cache.get_dividends(ticker):
+            # If limit is smaller than cached, return limited items, else full cache
+            return [Dividend(**d) for d in cached_data[:limit]]
+
+    params = {
+        "ticker": ticker,
+        "limit": limit,
+        "order": "desc", # Get most recent dividends first
+    }
+    if ex_dividend_date_gte:
+        params["ex_dividend_date.gte"] = ex_dividend_date_gte
+    if ex_dividend_date_lte:
+        params["ex_dividend_date.lte"] = ex_dividend_date_lte
+    
+    # Note: Polygon's free tier might have limitations on dividend data access/history.
+    data = _polygon_get("https://api.polygon.io/v3/reference/dividends", params)
+    results = data.get("results", [])
+
+    dividends = [
+        Dividend(
+            ticker=r.get("ticker"),
+            dividend_type=r.get("dividend_type"),
+            ex_dividend_date=r.get("ex_dividend_date"),
+            pay_date=r.get("pay_date"),
+            declaration_date=r.get("declaration_date"),
+            cash_amount=float(r["cash_amount"]) if r.get("cash_amount") is not None else 0.0, # Ensure float
+            currency=r.get("currency"),
+            frequency=r.get("frequency") # This is an int (0, 1, 2, 4, 12)
+        )
+        for r in results if r.get("ex_dividend_date") and r.get("cash_amount") is not None # Ensure essential fields
+    ]
+
+    # Cache only if no date filters were applied, to store the full recent history
+    if not ex_dividend_date_gte and not ex_dividend_date_lte and dividends:
+        _cache.set_dividends(ticker, [d.model_dump() for d in dividends])
+    
+    return dividends

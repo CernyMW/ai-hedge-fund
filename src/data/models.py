@@ -172,3 +172,14 @@ class AgentStateData(BaseModel):
 class AgentStateMetadata(BaseModel):
     show_reasoning: bool = False
     model_config = {"extra": "allow"}
+
+
+class Dividend(BaseModel):
+    ticker: str
+    dividend_type: str | None = None # CD (Cash Dividend), SC (Stock Split), SP (Special Dividend) etc.
+    ex_dividend_date: str # YYYY-MM-DD
+    pay_date: str | None = None # YYYY-MM-DD
+    declaration_date: str | None = None # YYYY-MM-DD
+    cash_amount: float # Amount of the dividend per share
+    currency: str | None = None # Currency of the cash_amount
+    frequency: int | None = None # How often the dividend is paid. 0: One-Time, 1: Annually, 2: Semi-Annually, 4: Quarterly, 12: Monthly

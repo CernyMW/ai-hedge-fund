@@ -7,6 +7,7 @@ class Cache:
         self._line_items_cache: dict[str, list[dict[str, any]]] = {}
         self._insider_trades_cache: dict[str, list[dict[str, any]]] = {}
         self._company_news_cache: dict[str, list[dict[str, any]]] = {}
+        self._dividends_cache: dict[str, list[dict[str, any]]] = {} # Added dividends cache
 
     def _merge_data(self, existing: list[dict] | None, new_data: list[dict], key_field: str) -> list[dict]:
         """Merge existing and new data, avoiding duplicates based on a key field."""
@@ -60,6 +61,20 @@ class Cache:
     def set_company_news(self, ticker: str, data: list[dict[str, any]]):
         """Append new company news to cache."""
         self._company_news_cache[ticker] = self._merge_data(self._company_news_cache.get(ticker), data, key_field="date")
+
+    def get_dividends(self, ticker: str) -> list[dict[str, any]] | None:
+        """Get cached dividend data if available."""
+        return self._dividends_cache.get(ticker)
+
+    def set_dividends(self, ticker: str, data: list[dict[str, any]]):
+        """Append new dividend data to cache."""
+        # Dividends are generally immutable once declared for a specific date,
+        # so merging might involve replacing or careful handling if updates were possible.
+        # For simplicity, using ex_dividend_date as key.
+        # Polygon's API sorts by ex_dividend_date desc, so new data is likely more recent.
+        # A simple overwrite or append-if-new might be sufficient if API always gives full history up to a point.
+        # Using the existing _merge_data which handles de-duplication based on key_field.
+        self._dividends_cache[ticker] = self._merge_data(self._dividends_cache.get(ticker), data, key_field="ex_dividend_date")
 
 
 # Global cache instance
