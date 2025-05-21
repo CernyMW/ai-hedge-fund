@@ -66,7 +66,7 @@ def bill_ackman_agent(state: AgentState):
         quality_analysis = analyze_business_quality(metrics, financial_line_items)
         
         progress.update_status("bill_ackman_agent", ticker, "Analyzing balance sheet and capital structure")
-        balance_sheet_analysis = analyze_financial_discipline(metrics, financial_line_items)
+        balance_sheet_analysis = analyze_financial_discipline(metrics, financial_line_items, dividend_history) # Updated call
         
         progress.update_status("bill_ackman_agent", ticker, "Analyzing activism potential")
         activism_analysis = analyze_activism_potential(financial_line_items)
@@ -81,7 +81,7 @@ def bill_ackman_agent(state: AgentState):
             + activism_analysis["score"]
             + valuation_analysis["score"]
         )
-        max_possible_score = 20  # Adjust weighting as desired (5 from each sub-analysis, for instance)
+        max_possible_score = 16  # Sum of max scores from sub-analyses (7+4+2+3)
         
         # Generate a simple buy/hold/sell (bullish/neutral/bearish) signal
         if total_score >= 0.7 * max_possible_score:
@@ -216,7 +216,7 @@ def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
     }
 
 
-def analyze_financial_discipline(metrics: list, financial_line_items: list) -> dict:
+def analyze_financial_discipline(metrics: list, financial_line_items: list, dividend_history: list[Dividend]) -> dict: # Signature updated
     """
     Evaluate the company's balance sheet over multiple periods:
     - Debt ratio trends
@@ -225,55 +225,70 @@ def analyze_financial_discipline(metrics: list, financial_line_items: list) -> d
     score = 0
     details = []
     
-    if not metrics or not financial_line_items:
-        return {
-            "score": 0,
-            "details": "Insufficient data to analyze financial discipline"
-        }
+    if not metrics or not financial_line_items: # This check is for debt ratio part. Dividend check handles empty dividend_history.
+        # If financial_line_items is empty, we might still be able to analyze dividends if dividend_history is not empty.
+        # However, the function expects financial_line_items for debt ratios. So, if it's critical for the function as a whole:
+        if not financial_line_items: # Double check, explicit for clarity
+             details.append("Insufficient financial line item data for financial discipline analysis (debt ratios).")
+             # Decide if to return early or proceed with only dividend analysis
+             # For now, let's allow dividend analysis to proceed if financial_line_items is empty.
     
     # 1. Multi-period debt ratio or debt_to_equity
-    debt_to_equity_vals = [item.debt_to_equity for item in financial_line_items if item.debt_to_equity is not None]
-    if debt_to_equity_vals:
-        below_one_count = sum(1 for d in debt_to_equity_vals if d < 1.0)
-        if below_one_count >= (len(debt_to_equity_vals) // 2 + 1):
-            score += 2
-            details.append("Debt-to-equity < 1.0 for the majority of periods (reasonable leverage).")
-        else:
-            details.append("Debt-to-equity >= 1.0 in many periods (could be high leverage).")
-    else:
-        # Fallback to total_liabilities / total_assets
-        liab_to_assets = []
-        for item in financial_line_items:
-            if item.total_liabilities and item.total_assets and item.total_assets > 0:
-                liab_to_assets.append(item.total_liabilities / item.total_assets)
-        
-        if liab_to_assets:
-            below_50pct_count = sum(1 for ratio in liab_to_assets if ratio < 0.5)
-            if below_50pct_count >= (len(liab_to_assets) // 2 + 1):
+    if financial_line_items: # Only proceed if we have data for this
+        debt_to_equity_vals = [item.debt_to_equity for item in financial_line_items if item.debt_to_equity is not None]
+        if debt_to_equity_vals:
+            below_one_count = sum(1 for d in debt_to_equity_vals if d < 1.0)
+            if below_one_count >= (len(debt_to_equity_vals) // 2 + 1):
                 score += 2
-                details.append("Liabilities-to-assets < 50% for majority of periods.")
+                details.append("Debt-to-equity < 1.0 for the majority of periods (reasonable leverage).")
             else:
-                details.append("Liabilities-to-assets >= 50% in many periods.")
+                details.append("Debt-to-equity >= 1.0 in many periods (could be high leverage).")
         else:
-            details.append("No consistent leverage ratio data available.")
-    
+            # Fallback to total_liabilities / total_assets
+            liab_to_assets = []
+            for item in financial_line_items: # This loop is safe due to the outer if
+                if hasattr(item, 'total_liabilities') and hasattr(item, 'total_assets') and \
+                   item.total_liabilities is not None and item.total_assets is not None and item.total_assets > 0:
+                    liab_to_assets.append(item.total_liabilities / item.total_assets)
+            
+            if liab_to_assets:
+                below_50pct_count = sum(1 for ratio in liab_to_assets if ratio < 0.5)
+                if below_50pct_count >= (len(liab_to_assets) // 2 + 1):
+                    score += 2
+                    details.append("Liabilities-to-assets < 50% for majority of periods.")
+                else:
+                    details.append("Liabilities-to-assets >= 50% in many periods.")
+            else:
+                details.append("No consistent leverage ratio data available from financial line items.")
+    else: # financial_line_items was empty
+        details.append("No financial line items provided for debt ratio analysis.")
+
     # 2. Capital allocation approach (dividends + share counts)
-    dividends_list = [
-        item.dividends_and_other_cash_distributions
-        for item in financial_line_items
-        if item.dividends_and_other_cash_distributions is not None
-    ]
-    if dividends_list:
-        paying_dividends_count = sum(1 for d in dividends_list if d < 0)
-        if paying_dividends_count >= (len(dividends_list) // 2 + 1):
-            score += 1
-            details.append("Company has a history of returning capital to shareholders (dividends).")
+    # New dividend analysis using dividend_history
+    if dividend_history:
+        cash_dividend_years = set()
+        for div_event in dividend_history:
+            if div_event.dividend_type == 'CD' and div_event.cash_amount > 0.0 and div_event.ex_dividend_date:
+                try:
+                    year = int(div_event.ex_dividend_date[:4])
+                    cash_dividend_years.add(year)
+                except ValueError:
+                    continue # Skip malformed dates
+        
+        num_distinct_dividend_years = len(cash_dividend_years)
+
+        if num_distinct_dividend_years >= 5: # Ackman might look for established, but not necessarily ancient, dividend payers
+            score += 1 
+            details.append(f"History of cash dividends: Paid in {num_distinct_dividend_years} distinct years (>=5 years is a positive sign of capital return).")
+        elif num_distinct_dividend_years > 0:
+            details.append(f"Limited dividend history: Paid cash dividends in {num_distinct_dividend_years} year(s).")
         else:
-            details.append("Dividends not consistently paid or no data on distributions.")
+            details.append("No significant history of cash dividend payments found in provided data (special dividends or non-cash events might exist).")
     else:
-        details.append("No dividend data found across periods.")
+        # No dividends reported by get_dividend_history
+        details.append("No dividend payments reported; capital may be primarily reinvested or returned via buybacks.")
     
-    # Check for decreasing share count (simple approach)
+    # Check for decreasing share count (simple approach) - This part requires financial_line_items
     shares = [item.outstanding_shares for item in financial_line_items if item.outstanding_shares is not None]
     if len(shares) >= 2:
         # For buybacks, the newest count should be less than the oldest count

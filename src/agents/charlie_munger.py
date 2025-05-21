@@ -1,5 +1,6 @@
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_financial_metrics, get_market_cap, search_line_items, get_insider_trades, get_company_news
+from src.tools.api import get_financial_metrics, get_market_cap, search_line_items, get_insider_trades, get_company_news, get_dividend_history # Updated import
+from src.data.models import Dividend # Added import
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -77,11 +78,15 @@ def charlie_munger_agent(state: AgentState):
             limit=100
         )
         
+        progress.update_status("charlie_munger_agent", ticker, "Fetching dividend history")
+        # Fetch up to ~20 years of quarterly dividends for long-term assessment.
+        dividend_history: list[Dividend] = get_dividend_history(ticker, limit=80)
+        
         progress.update_status("charlie_munger_agent", ticker, "Analyzing moat strength")
         moat_analysis = analyze_moat_strength(metrics, financial_line_items)
         
         progress.update_status("charlie_munger_agent", ticker, "Analyzing management quality")
-        management_analysis = analyze_management_quality(financial_line_items, insider_trades)
+        management_analysis = analyze_management_quality(financial_line_items, insider_trades, dividend_history) # Updated call
         
         progress.update_status("charlie_munger_agent", ticker, "Analyzing business predictability")
         predictability_analysis = analyze_predictability(financial_line_items)
@@ -263,7 +268,7 @@ def analyze_moat_strength(metrics: list, financial_line_items: list) -> dict:
     }
 
 
-def analyze_management_quality(financial_line_items: list, insider_trades: list) -> dict:
+def analyze_management_quality(financial_line_items: list, insider_trades: list, dividend_history: list[Dividend]) -> dict: # Signature updated
     """
     Evaluate management quality using Munger's criteria:
     - Capital allocation wisdom
@@ -415,7 +420,53 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
     
     # Scale score to 0-10 range
     # Maximum possible raw score would be 12 (3+3+2+2+2)
-    final_score = max(0, min(10, score * 10 / 12))
+    # final_score = max(0, min(10, score * 10 / 12)) # Old scaling
+
+    # 6. Dividend Policy Assessment (Rational Capital Allocation)
+    if dividend_history:
+        cash_dividend_years = set()
+        annual_total_dividends = {} # year_str -> total_amount
+        for div_event in dividend_history:
+            if div_event.dividend_type == 'CD' and div_event.cash_amount > 0.0 and div_event.ex_dividend_date:
+                try:
+                    year = div_event.ex_dividend_date[:4]
+                    cash_dividend_years.add(year)
+                    annual_total_dividends[year] = annual_total_dividends.get(year, 0.0) + div_event.cash_amount
+                except ValueError:
+                    continue 
+        
+        num_distinct_dividend_years = len(cash_dividend_years)
+
+        if num_distinct_dividend_years >= 5:
+            score += 1 # Add a point for consistent dividend payments
+            details.append(f"Consistent Dividend Payer: Paid cash dividends in {num_distinct_dividend_years} distinct years.")
+            
+            # Calculate Payout Ratio using annual net income from financial_line_items
+            # financial_line_items are annual and sorted recent first
+            payout_ratios_calculated = []
+            # Consider last 5 years for payout ratio if data available
+            for item in financial_line_items[:5]: 
+                if hasattr(item, 'report_period') and hasattr(item, 'net_income') and item.net_income is not None and item.net_income > 0:
+                    year_str = item.report_period[:4]
+                    if year_str in annual_total_dividends:
+                        payout = annual_total_dividends[year_str] / item.net_income
+                        payout_ratios_calculated.append(payout)
+            
+            if payout_ratios_calculated:
+                avg_payout = sum(payout_ratios_calculated) / len(payout_ratios_calculated)
+                details.append(f"Avg. Payout Ratio (recent years with positive NI): {avg_payout:.1%}.")
+            else:
+                details.append("Payout ratio not calculated (insufficient net income or matching dividend data).")
+
+        elif num_distinct_dividend_years > 0:
+            details.append(f"Limited Dividend History: Paid cash dividends in {num_distinct_dividend_years} year(s).")
+        else:
+            details.append("No significant history of cash dividend payments found in provided data.")
+    else:
+        details.append("No Dividend Payments Reported: Capital likely reinvested or managed otherwise.")
+
+    # Adjust final score scaling: Original max raw score was 12. Adding max +1 for dividends = 13.
+    final_score = max(0, min(10, score * 10 / 13)) # New scaling
     
     return {
         "score": final_score,
@@ -699,9 +750,10 @@ def generate_munger_output(
             When providing your reasoning, be thorough and specific by:
             1. Explaining the key factors that influenced your decision the most (both positive and negative)
             2. Applying at least 2-3 specific mental models or disciplines to explain your thinking
-            3. Providing quantitative evidence where relevant (e.g., specific ROIC values, margin trends)
-            4. Citing what you would "avoid" in your analysis (invert the problem)
-            5. Using Charlie Munger's direct, pithy conversational style in your explanation
+            3. Providing quantitative evidence where relevant (e.g., specific ROIC values, margin trends, dividend history and payout ratios)
+            4. Evaluating management's capital allocation decisions, including their dividend policy (or lack thereof), share buybacks, debt management, and reinvestment strategy in relation to the company's ROIC and overall business quality.
+            5. Citing what you would "avoid" in your analysis (invert the problem)
+            6. Using Charlie Munger's direct, pithy conversational style in your explanation
             
             For example, if bullish: "The high ROIC of 22% demonstrates the company's moat. When applying basic microeconomics, we can see that competitors would struggle to..."
             For example, if bearish: "I see this business making a classic mistake in capital allocation. As I've often said about [relevant Mungerism], this company appears to be..."
