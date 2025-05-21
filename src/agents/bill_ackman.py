@@ -1,6 +1,7 @@
 from langchain_openai import ChatOpenAI
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
+from src.tools.api import get_financial_metrics, get_market_cap, search_line_items, get_dividend_history # Updated import
+from src.data.models import Dividend # Added import
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -56,6 +57,10 @@ def bill_ackman_agent(state: AgentState):
         
         progress.update_status("bill_ackman_agent", ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date)
+
+        progress.update_status("bill_ackman_agent", ticker, "Fetching dividend history")
+        # Fetch up to ~10 years of quarterly dividends.
+        dividend_history: list[Dividend] = get_dividend_history(ticker, limit=40)
         
         progress.update_status("bill_ackman_agent", ticker, "Analyzing business quality")
         quality_analysis = analyze_business_quality(metrics, financial_line_items)

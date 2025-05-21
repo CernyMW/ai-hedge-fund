@@ -12,7 +12,9 @@ from src.tools.api import (
     get_financial_metrics,
     get_market_cap,
     search_line_items,
+    get_dividend_history, # Added
 )
+from src.data.models import Dividend # Added import
 from src.utils.llm import call_llm
 from src.utils.progress import progress
 
@@ -54,18 +56,24 @@ def aswath_damodaran_agent(state: AgentState):
                 "capital_expenditure",
                 "depreciation_and_amortization",
                 "outstanding_shares",
-                "net_income",
-                "total_debt",
+                "net_income", # Needed for EPS if not directly in FinancialMetrics
+                "earnings_per_share", # Explicitly request EPS
             ],
             end_date,
+            period="annual", # Fetch annual data
+            limit=5  # Match the number of periods for metrics
         )
 
         progress.update_status("aswath_damodaran_agent", ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date)
 
+        progress.update_status("aswath_damodaran_agent", ticker, "Fetching dividend history")
+        # Fetch up to ~10 years of quarterly dividends.
+        dividend_history: list[Dividend] = get_dividend_history(ticker, limit=40)
+
         # ─── Analyses ───────────────────────────────────────────────────────────
         progress.update_status("aswath_damodaran_agent", ticker, "Analyzing growth and reinvestment")
-        growth_analysis = analyze_growth_and_reinvestment(metrics, line_items)
+        growth_analysis = analyze_growth_and_reinvestment(metrics, line_items, dividend_history) # Updated call
 
         progress.update_status("aswath_damodaran_agent", ticker, "Analyzing risk profile")
         risk_analysis = analyze_risk_profile(metrics, line_items)
@@ -139,7 +147,7 @@ def aswath_damodaran_agent(state: AgentState):
 # ────────────────────────────────────────────────────────────────────────────────
 # Helper analyses
 # ────────────────────────────────────────────────────────────────────────────────
-def analyze_growth_and_reinvestment(metrics: list, line_items: list) -> dict[str, any]:
+def analyze_growth_and_reinvestment(metrics: list, line_items: list, dividend_history: list[Dividend]) -> dict[str, any]: # Signature updated
     """
     Growth score (0‑4):
       +2  5‑yr CAGR of revenue > 8 %
@@ -185,6 +193,60 @@ def analyze_growth_and_reinvestment(metrics: list, line_items: list) -> dict[str
     if latest.return_on_invested_capital and latest.return_on_invested_capital > 0.10:
         score += 1
         details.append(f"ROIC {latest.return_on_invested_capital:.1%} (> 10 %)")
+
+    # Dividend Analysis (Payout Ratio and Consistency)
+    if dividend_history:
+        annual_dividends_paid = {} # year -> total_cash_dividend
+        for div in dividend_history:
+            if div.dividend_type == 'CD' and div.cash_amount > 0 and div.ex_dividend_date:
+                try:
+                    year_str = div.ex_dividend_date[:4]
+                    annual_dividends_paid[year_str] = annual_dividends_paid.get(year_str, 0.0) + div.cash_amount
+                except Exception:
+                    continue # Skip malformed data
+
+        # Correlate with annual EPS from line_items (which are now annual)
+        # `line_items` are assumed to be sorted with most recent first by `search_line_items`
+        payout_ratios = []
+        dividend_years_notes = []
+        
+        # Create a dictionary for quick EPS lookup by report_period year
+        eps_by_year = {}
+        for item in line_items: # line_items are annual
+            if hasattr(item, 'report_period') and hasattr(item, 'earnings_per_share') and item.earnings_per_share is not None:
+                try:
+                    # Assuming report_period is like 'YYYY-MM-DD'
+                    year_str = item.report_period[:4]
+                    eps_by_year[year_str] = item.earnings_per_share
+                except Exception:
+                    continue
+        
+        sorted_dividend_years = sorted(annual_dividends_paid.keys(), reverse=True)
+
+        for year_str in sorted_dividend_years[:5]: # Analyze up to last 5 years of dividends
+            total_div_for_year = annual_dividends_paid[year_str]
+            eps_for_year = eps_by_year.get(year_str)
+
+            if eps_for_year is not None and eps_for_year > 0: # EPS must be positive for meaningful payout
+                payout = total_div_for_year / eps_for_year
+                payout_ratios.append(payout)
+                dividend_years_notes.append(f"{year_str} (Payout: {payout:.1%})")
+            elif eps_for_year is not None: # EPS is zero or negative
+                dividend_years_notes.append(f"{year_str} (Dividends: {total_div_for_year:.2f}, EPS: {eps_for_year:.2f})")
+            else: # EPS not found for that year
+                dividend_years_notes.append(f"{year_str} (Dividends: {total_div_for_year:.2f}, EPS: N/A)")
+
+        if payout_ratios:
+            avg_payout_ratio = sum(payout_ratios) / len(payout_ratios)
+            details.append(f"Avg. Payout Ratio (last {len(payout_ratios)} div years with positive EPS): {avg_payout_ratio:.1%}")
+        
+        if dividend_years_notes:
+            details.append(f"Dividend History (recent): {'; '.join(dividend_years_notes)}")
+        elif not annual_dividends_paid: # dividend_history had items, but none were cash dividends
+             details.append("No cash dividend payments found in recent history.")
+
+    else: # dividend_history is empty
+        details.append("No dividend payments reported for this stock.")
 
     return {"score": score, "max_score": max_score, "details": "; ".join(details), "metrics": latest.model_dump()}
 
@@ -378,7 +440,7 @@ def generate_damodaran_output(
 
                 Speak with your usual clear, data‑driven tone:
                   ◦ Start with the company “story” (qualitatively)
-                  ◦ Connect that story to key numerical drivers: revenue growth, margins, reinvestment, risk
+                  ◦ Connect that story to key numerical drivers: revenue growth, margins, reinvestment (including an assessment of dividend policy and payout ratios in the context of FCFE and growth stage), risk
                   ◦ Conclude with value: your FCFF DCF estimate, margin of safety, and relative valuation sanity checks
                   ◦ Highlight major uncertainties and how they affect value
                 Return ONLY the JSON specified below.""",
